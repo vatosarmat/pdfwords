@@ -3,7 +3,7 @@ set(CMAKE_C_COMPILER clang CACHE STRING "" FORCE)
 set(CMAKE_CXX_COMPILER clang++ CACHE STRING "" FORCE)
 set(CMAKE_CXX_STANDARD 20 CACHE STRING "" FORCE)
 
-project(word_extractor)
+project(pdf_extractor)
 
 find_package(fmt)
 find_package(PkgConfig REQUIRED)
