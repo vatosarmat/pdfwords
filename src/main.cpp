@@ -23,33 +23,18 @@
 #include <poppler-page.h>
 #include <poppler-toc.h>
 
+#include "utils.h"
+
 using namespace std;
-template <class T>
-using boptional = boost::optional<T>;
 using poppler::rectf;
 using poppler::ustring;
 namespace po = boost::program_options;
-
-template <typename V>
-struct fmt::formatter<boptional<V>> : formatter<string_view> {
-  template <typename FormatContext>
-  auto format(const boptional<V>& opt, FormatContext& ctx) -> decltype(ctx.out()) {
-    if (opt.has_value()) {
-      return format_to(ctx.out(), "{}", opt.value());
-    }
-    return format_to(ctx.out(), "NONE");
-  }
-};
-
-template <typename... T>
-void panic(fmt::format_string<T...> fmt, T&&... args) {
-  fmt::print(stderr, fmt, args...);
-  std::cout << endl;
-  exit(1);
-}
+template <class T>
+using umap = unordered_map<ustring, T, boost::hash<ustring>>;
+using uint = unsigned int;
 
 namespace WordParser {
-static constexpr uint32_t bit(int n) {
+static constexpr auto bit(int n) -> uint32_t {
   return 1 << n;
 }
 enum class State : uint32_t {
@@ -59,37 +44,37 @@ enum class State : uint32_t {
   APOSTROPHE = bit(2)
 };
 
-State operator|(State a, State b) {
+auto operator|(State a, State b) -> State {
   return static_cast<State>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
 }
-State operator^(State a, State b) {
+auto operator^(State a, State b) {
   return static_cast<State>(static_cast<uint32_t>(a) ^ static_cast<uint32_t>(b));
 }
-bool operator&(State a, State b) {
+auto operator&(State a, State b) {
   return static_cast<uint32_t>(a) & static_cast<uint32_t>(b);
 }
-State& operator^=(State& a, State b) {
+auto operator^=(State& a, State b) -> State& {
   a = a ^ b;
   return a;
 }
-State& operator|=(State& a, State b) {
+auto operator|=(State& a, State b) -> State& {
   a = a | b;
   return a;
 }
 
-bool isapostrophe(int c) {
+auto isapostrophe(int c) -> bool {
   const array<unsigned short, 2> apostrophes = {'\'', u'’'};
   return c == apostrophes[0] || c == apostrophes[1];
 }
 
-bool ishyphen(int c) {
+auto ishyphen(int c) -> bool {
   return c == '-';
 }
 
-const auto roman_numeral_regex =
-    wregex(L"^m{0,4}(cm|cd|d?c{0,3})(xc|xl|l?x{0,3})(ix|iv|v?i{0,3})$");
+auto is_roman_numeral(const ustring& str) -> bool {
+  const auto roman_numeral_regex =
+      wregex(L"^m{0,4}(cm|cd|d?c{0,3})(xc|xl|l?x{0,3})(ix|iv|v?i{0,3})$");
 
-bool is_roman_numeral(const ustring& str) {
   if (str.empty()) {
     return false;
   };
@@ -107,35 +92,43 @@ class WordCounter {
                 [](unsigned short c) -> unsigned short { return tolower(c); });
 
       if (!filter.contains(lowered) && !WordParser::is_roman_numeral(lowered)) {
-        ++data[move(lowered)];
+        ++word_count[move(lowered)];
       }
     }
     word.clear();
   }
 
   // Word:count
-  unordered_map<ustring, unsigned int, boost::hash<ustring>> data;
+  umap<uint> word_count;
+  umap<string> word_supplement;
   const set<ustring>& filter;
 
 public:
-  explicit WordCounter(const set<ustring>& filter) : filter(filter), data() {}
+  explicit WordCounter(const set<ustring>& filter, umap<uint>&& initial_count,
+                       umap<string>&& supplement)
+      : filter(filter), word_count(initial_count), word_supplement(supplement) {}
 
-  void count_words(const vector<poppler::page*>& pages, boptional<int> width, boptional<int> height,
-                   bool log) {
+  void count_words(const vector<poppler::page*>& pages, boptional<int> x, boptional<int> y,
+                   boptional<int> width, boptional<int> height, boptional<string> textFileName) {
     using namespace WordParser;
+
+    boptional<ofstream> textFile;
+    if (textFileName.has_value()) {
+      textFile = ofstream(textFileName.value());
+    }
 
     auto state = State::BLANK;
     ustring word;
     for (const auto& page : pages) {
       auto page_rect = page->page_rect();
-      auto text = page->text(rectf(page_rect.x(), page_rect.y(), width.value_or(page_rect.width()),
-                                   height.value_or(page_rect.height())),
-                             poppler::page::non_raw_non_physical_layout);
-      if (log) {
-        fmt::print("{}\n", text.to_utf8().data());
-      }
+      auto text =
+          page->text(rectf(x.value_or(page_rect.x()), y.value_or(page_rect.y()),
+                           width.value_or(page_rect.width()), height.value_or(page_rect.height())),
+                     poppler::page::non_raw_non_physical_layout);
 
-      text.to_utf8();
+      if (textFile.has_value()) {
+        textFile.value() << text.to_utf8().data() << endl;
+      }
       auto it = text.begin();
       while (it != text.end()) {
         auto ch = *it++;
@@ -177,20 +170,26 @@ public:
   }
 
   void print() {
-    multimap<unsigned int, ustring, greater<unsigned int>> sorted;
-    transform(data.cbegin(), data.cend(), inserter(sorted, sorted.end()),
+    multimap<unsigned int, ustring, greater<>> sorted;
+    transform(word_count.cbegin(), word_count.cend(), inserter(sorted, sorted.end()),
               [](const pair<ustring, unsigned int>& item) -> pair<unsigned int, ustring> {
                 return pair{item.second, item.first};
               });
     for (const auto& [count, word] : sorted) {
-      fmt::print("{:20} {}\n", word.to_utf8().data(), count);
+      auto utf8 = word.to_utf8();
+      auto supplement = word_supplement.find(word);
+      if (supplement != word_supplement.end()) {
+        fmt::print("{:20} {:<3} {}\n", utf8.data(), count, supplement->second);
+      } else {
+        fmt::print("{:20} {:<3}\n", utf8.data(), count);
+      }
     }
   }
 };
 
-vector<poppler::page*> load_doc_pages(const string& fileName, boptional<int> startPage,
-                                      boptional<int> pagesCount) {
-  auto doc = poppler::document::load_from_file(fileName.c_str());
+auto load_doc_pages(const string& fileName, boptional<int> startPage, boptional<int> pagesCount)
+    -> vector<poppler::page*> {
+  auto* doc = poppler::document::load_from_file(resolve_path(fileName));
   if (!doc) {
     panic("loading error");
   }
@@ -213,9 +212,9 @@ set<ustring> load_filter(const boptional<string>& fileName) {
     return {};
   }
 
-  ifstream ifs(fileName.value().c_str());
+  ifstream ifs(resolve_path(fileName.value()).c_str());
   if (!ifs) {
-    panic("Failed to open filter file %s", fileName);
+    panic("Failed to open filter file {}", fileName);
   }
   set<ustring> ret;
   string utf8Line;
@@ -226,10 +225,40 @@ set<ustring> load_filter(const boptional<string>& fileName) {
   return ret;
 }
 
+pair<umap<uint>, umap<string>> load_merge_file(const boptional<string>& fileName, bool keepCount) {
+  if (!fileName.has_value()) {
+    return make_pair(umap<uint>{}, umap<string>{});
+  }
+
+  ifstream ifs(resolve_path(fileName.value()).c_str());
+  if (!ifs) {
+    panic("Failed to open filter file {}", fileName);
+  }
+  umap<uint> count_map;
+  umap<string> supplement_map;
+  string utf8Line;
+  smatch mr;
+  regex re{R"((\S+)\s+(\d+)\s+(.*))"};
+  while (getline(ifs, utf8Line)) {
+    regex_match(utf8Line, mr, re);
+    auto uword = ustring::from_utf8(mr[1].str().data());
+    auto count = stoul(mr[2].str());
+    auto suppl = mr[3].str();
+    count_map[uword] = keepCount ? count : 0;
+    supplement_map[uword] = suppl;
+  }
+
+  return make_pair(count_map, supplement_map);
+}
+
 struct Config {
   string inputFile;
-  bool log;
+  boptional<string> textFile;
   boptional<string> filterFile;
+  boptional<string> mergeFile;
+  bool keepCount{false};
+  boptional<int> x;
+  boptional<int> y;
   boptional<int> width;
   boptional<int> height;
   boptional<int> startPage;
@@ -245,14 +274,21 @@ struct Config {
     po::positional_options_description pd;
 
     Config config;
-    odesc.add_options()                                                                      //
-        ("help", "help message")                                                             //
-        ("log,L", po::bool_switch(&config.log), "print page content")                        //
-        ("input-file,I", po::value<string>(&config.inputFile)->required(), "input pdf file") //
+    odesc.add_options()          //
+        ("help", "help message") //
+        ("text,T", po::value<boptional<string>>(&config.textFile),
+         "text content of the input PDF file")                                               //
+        ("input-file,I", po::value<string>(&config.inputFile)->required(), "input PDF file") //
         ("filter-file,F", po::value<boptional<string>>(&config.filterFile),
-         "text file, list of words to be excluded from the output")                     //
+         "text file, list of words to be excluded from the output") //
+        ("merge-file,M", po::value<boptional<string>>(&config.mergeFile),
+         "text file which content is similar to the ouput to be merged with the output ") //
+        ("keep-count,K", po::bool_switch(&config.keepCount),
+         "keep words counts from merge-file, or reset them to 0")                       //
         ("start-page,S", po::value<boptional<int>>(&config.startPage), "start page")    //
         ("pages-count,C", po::value<boptional<int>>(&config.pagesCount), "pages count") //
+        ("x,X", po::value<boptional<int>>(&config.x), "crop start x")                   //
+        ("y,Y", po::value<boptional<int>>(&config.y), "crop start y")                   //
         ("width,W", po::value<boptional<int>>(&config.width), "crop width")             //
         ("height,H", po::value<boptional<int>>(&config.height), "crop height")          //
         ;
@@ -263,15 +299,30 @@ struct Config {
       po::store(po::command_line_parser(argc, argv).options(odesc).positional(pd).run(), ovm);
       po::notify(ovm);
     } catch (const boost::wrapexcept<po::required_option>& e) {
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+      fmt::print("Usage: {} [options] {}\n", argv[0], pd.name_for_position(0));
       cout << odesc << endl;
       exit(1);
     }
-    if (ovm.count("help")) {
+    if (ovm.count("help") != 0) {
       cout << odesc << endl;
       exit(1);
     }
 
     return config;
+  }
+
+  void resolve_symlinks() {
+    this->inputFile = resolve_path(this->inputFile);
+    if (this->textFile.has_value()) {
+      this->textFile = resolve_path(this->textFile.value());
+    }
+    if (this->filterFile.has_value()) {
+      this->filterFile = resolve_path(this->filterFile.value());
+    }
+    if (this->mergeFile.has_value()) {
+      this->mergeFile = resolve_path(this->mergeFile.value());
+    }
   }
 };
 
@@ -280,8 +331,9 @@ int main(int argc, const char** argv) {
   auto config = Config::from_argv(argc, argv);
   auto pages = load_doc_pages(config.inputFile, config.startPage, config.pagesCount);
   auto filter = load_filter(config.filterFile);
-  WordCounter wordCounter{filter};
-  wordCounter.count_words(pages, config.width, config.height, config.log);
+  auto [count_map, suppl_map] = load_merge_file(config.mergeFile, config.keepCount);
+  WordCounter wordCounter{filter, std::move(count_map), std::move(suppl_map)};
+  wordCounter.count_words(pages, config.x, config.y, config.width, config.height, config.textFile);
   wordCounter.print();
 
   return 0;

@@ -10,7 +10,7 @@ find_package(Boost REQUIRED COMPONENTS headers program_options)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(poppler-cpp REQUIRED IMPORTED_TARGET poppler-cpp)
 
-add_executable(pdfwords main.cpp)
+add_executable(pdfwords src/main.cpp src/utils.cpp)
 target_link_libraries(
   pdfwords
   PRIVATE fmt::fmt
